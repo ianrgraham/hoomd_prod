@@ -1,2 +1,4 @@
-*log.dat
-*traj.gsd
+*.dat
+*.gsd
+*.npz
+*.pkl
