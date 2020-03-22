@@ -1,6 +1,7 @@
 import argparse
 import numpy as np
 import hoomd
+from numba import njit
 from hoomd import md
 import sys
 import time
@@ -34,7 +35,7 @@ maxIter = cmdargs.iter
 phi = .7
 tphi = .9
 pressure = cmdargs.pressure
-min_steps = 5000
+min_steps = 1000
 
 maxStrain = cmdargs.maxStrain
 strainStep = cmdargs.strainStep
@@ -42,7 +43,7 @@ steps = int(np.rint(maxStrain/strainStep))
 fileSuf = cmdargs.fileSuffix
 if fileSuf != "":
     fileSuf += "_"
-seeddir = f"/home1/igraham/Projects/hoomd_test/test_data/{fileSuf}constPressure{pressure}_N{N}_seed{cmdargs.seed}_maxStrain{maxStrain}_strainStep{strainStep}"
+seeddir = f"/home1/igraham/Projects/hoomd_test/const_pressure_samples/{fileSuf}constPressure{pressure}_N{N}_seed{cmdargs.seed}_maxStrain{maxStrain}_strainStep{strainStep}"
 os.makedirs(seeddir,exist_ok=True)
 
 def phi_to_L(phi=0.9,N=16000):
@@ -61,7 +62,7 @@ nlist = md.nlist.cell()
 mypair = module_MD_potentials.set_interaction_potential_hertzian(nlist)
 
 #until I write randomizing code...
-coarse_dt=0.025
+coarse_dt=0.25
 fine_dt=0.25
 
 analyzerManyVariables_quantities = ['pressure',
@@ -70,33 +71,46 @@ analyzerManyVariables_quantities = ['pressure',
 
 nve = hoomd.md.integrate.nve(group=hoomd.group.all())
 #nph = hoomd.md.integrate.nph(group=hoomd.group.all(), P=pressure, tauP=1.0, gamma=0.1)
-fire_coarse = hoomd.md.integrate.mode_minimize_fire(dt=coarse_dt, alpha_start=0.1, ftol=1e-7, Etol=1e-7)
+fire_coarse = hoomd.md.integrate.mode_minimize_fire(dt=fine_dt, alpha_start=0.1, ftol=1e-7, Etol=1e-7)
 
 i = 0
 
 initial_steps = 0
-
-vlist = [[0,L], [1000000,tL]]
+coarse_steps = 1000
+tot_steps = coarse_steps*100
+vlist = [[0,L], [tot_steps,tL]]
 #vlist.extend([[initial_steps+(steps+i*4*steps)*min_steps, maxStrain],
 #print(vlist)
 var = hoomd.variant.linear_interp(vlist)
-updater = hoomd.update.box_resize(L = var, period=min_steps, phase=0)
-coarse_steps = 1000
+updater = hoomd.update.box_resize(L = var, period=coarse_steps, phase=0)
 # come up from jamming
+
+@njit
+def is_periodic(energy, tol):
+    e1 = energy[-1]
+    e2 = energy[-1]
+    if np.abs(e1-e2)/(e1+e2) < tol:
+        return True
+    else:
+        return False
 
 log2 = hoomd.analyze.log(filename=seeddir+"/log_tmp.dat",
         quantities=analyzerManyVariables_quantities, period=min_steps, phase=min_steps-1)
-while not(fire_coarse.has_converged()) or i*coarse_steps < 1000000:
+while not(fire_coarse.has_converged()) or i*coarse_steps < tot_steps:
+    fire_coarse.reset()
     hoomd.run(coarse_steps,quiet=True)
     print(i)
     i += 1
 i=0
 
+fire_coarse.reset()
+
 nve.disable()
+updater.disable()
 
 nph = hoomd.md.integrate.nph(group=hoomd.group.all(), P=pressure, tauP=1.0, gamma=0.1)
-
-while not(fire_coarse.has_converged()) or np.abs(log2.query('pressure') - pressure)/pressure > 1e-3:
+fire_coarse = hoomd.md.integrate.mode_minimize_fire(dt=coarse_dt, alpha_start=0.1, ftol=1e-7, Etol=1e-7)
+while not(fire_coarse.has_converged()) or np.abs(log2.query('pressure') - pressure)/pressure > 1e-4:
     print(log2.query('pressure'))
     hoomd.run(coarse_steps,quiet=True)
     print(i)
@@ -104,6 +118,9 @@ while not(fire_coarse.has_converged()) or np.abs(log2.query('pressure') - pressu
         break
     i += 1
 i=0
+
+energy = []
+energy.append(log2.query('potential_energy'))
 
 log2.disable()
 
@@ -129,17 +146,32 @@ filedump = hoomd.dump.gsd(filename=seeddir+"/traj.gsd",
                 group=hoomd.group.all(), phase=min_steps-1)
 
 total_steps = steps*4*maxIter+1
+period = steps*4
 print(total_steps)
 fire = hoomd.md.integrate.mode_minimize_fire(dt=fine_dt, alpha_start=0.1, ftol=1e-7, Etol=1e-7)
 #for idx in range(total_steps):
 idx = 0
+tol = 1e-5
+lastwasgood = False
+done = False
 while True:
-    if (idx >= total_steps):
+    if (idx >= total_steps) or done:
         break
-    fire.reset()
-    while not(fire.has_converged()):
-        hoomd.run(min_steps,quiet=True)
-        idx += 1
-    if idx%10 ==0:
-        print(total_steps, idx, log.query('xy'),  log.query('pressure_xy'))
+    if fire.has_converged():
+        fire.reset()
+    hoomd.run(min_steps,quiet=True)
+    idx += 1
+    #if idx%10 ==0:
+    #    print(total_steps, idx, log.query('xy'),  log.query('pressure_xy'))
+    if idx%period == 0:
+        energy.append(log.query('potential_energy'))
+        if lastwasgood:
+            if is_periodic(energy, tol):
+                done = True
+            else:
+                lastwasgood = False
+        elif is_periodic(energy, tol):
+            lastwasgood = True
+
+
         

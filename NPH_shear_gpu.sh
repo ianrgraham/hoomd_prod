@@ -6,7 +6,7 @@
 #SBATCH --threads-per-core=1
 #SBATCH --cpus-per-task=1
 #SBATCH --ntasks=1
-#SBATCH --array=0-100
+#SBATCH --array=0-24
 #SBATCH --partition=gpu
 #SBATCH --gres=gpu:titan_v:1
 #SBATCH --mem=2G
@@ -29,4 +29,4 @@ fi
 # execute c++ code for all files with N=2048
 # mkdir -p /data1/shared/igraham/datasets/fast_sim2
 cd /home1/igraham/Projects/hoomd_test
-/home1/igraham/anaconda3/envs/softmatter/bin/python NPH_shear.py -s ${NUM} -i 40 -m 1e-2 -n 10000 -p $(( 10**($NUM/) ))e-3
+/home1/igraham/anaconda3/envs/softmatter/bin/python NPH_shear.py -s ${NUM} -i 40 -m $(( ($NUM%25)/5 + 1 ))e-2 -n 10000 -p $(( 10**($NUM/25) ))e-3
