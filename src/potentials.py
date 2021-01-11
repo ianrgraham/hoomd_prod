@@ -26,6 +26,17 @@ def set_interaction_potential_LJ(NeighborsListLJ):
     myLjPair.set_params(mode="xplor")   ## smooth interpolation starting at r_on and ending at r_cut
     return myLjPair
 
+def set_interaction_potential_LJ_mono(NeighborsListLJ):
+    r_cutoff=2.5
+    eps_AA=1
+    sig_AA=1
+    r_on_cutoff=1.2
+    ## specify Lennard-Jones interactions between particle pairs
+    myLjPair = md.pair.lj(r_cut=r_cutoff, nlist=NeighborsListLJ)
+    myLjPair.pair_coeff.set('A', 'A', epsilon=eps_AA, sigma=sig_AA, r_cut=r_cutoff*sig_AA, r_on=r_on_cutoff*sig_AA)
+    myLjPair.set_params(mode="xplor")   ## smooth interpolation starting at r_on and ending at r_cut
+    return myLjPair
+
 def WCA_smooth(r, rmin, rmax, epsilon, sigma):
     V = 4 * epsilon * ( (sigma / r)**12 - (sigma / r)**6) + epsilon     -  epsilon * (36*2**(-1/3.)*(r-rmax)**2)     / sigma**2
     F = 4 * epsilon / r * ( 12 * (sigma / r)**12 - 6 * (sigma / r)**6)  +  epsilon * (36*2**(-1/3.)*(r-rmax)   ) *2  / sigma**2
@@ -72,6 +83,11 @@ def set_interaction_potential_hertzian(NeighborsList):
     myPair.pair_coeff.set("A", "A", func=hertz, rmin=0.0, rmax=5/6, coeff= dict(sigma=5/6))
     myPair.pair_coeff.set("B", "B", func=hertz, rmin=0.0, rmax=7/6, coeff= dict(sigma=7/6))
     myPair.pair_coeff.set("A", "B", func=hertz, rmin=0.0, rmax=1.0, coeff= dict(sigma=1.0)) 
+    return myPair
+
+def set_interaction_potential_hertzian_mono(NeighborsList):
+    myPair = md.pair.table(width=1000,nlist=NeighborsList)
+    myPair.pair_coeff.set("A", "A", func=hertz, rmin=0.0, rmax=1, coeff= dict(sigma=1))
     return myPair
 
 """

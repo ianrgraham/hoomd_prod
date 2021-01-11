@@ -2,9 +2,12 @@
 
 import numpy as np
 import hoomd
+from numba import njit
 from hoomd import md
 import helper
 import potentials
+import os
+import sys
 #import pyvoro
 
 
@@ -68,7 +71,7 @@ def pbc_dist(p1, p2, L):
     p2 -= c2
     return p2 - p1 # return vector from p1 to p2
 
-def yield_stress_routine(system, snapshot, N1, N2, potential=potentials.set_interaction_potential_hertzian, dump=None):
+def yield_stress_routine(system, snapshot, N1, N2, potential=potentials.set_interaction_potential_hertzian, dump=None, dry=False):
     maxStrain = 3e-1
     strainStep = 1e-3
     steps = int(np.rint(maxStrain/strainStep))
@@ -79,11 +82,15 @@ def yield_stress_routine(system, snapshot, N1, N2, potential=potentials.set_inte
 
     yss = []
 
-    if dump is not None:
-        rootdir = f"/home/ian/Documents/Projects/hoomd_prod/test/"
-        analyzerManyVariables_quantities = ['pressure',
-            'potential_energy', 'volume', 'pressure_xy',
-            'pressure_xx', 'pressure_yy', 'xy'] 
+    if dry:
+        pass
+        #system.
+
+    #if dump is not None:
+    rootdir = f"/home/ian/Documents/Projects/hoomd_prod/test/"
+    analyzerManyVariables_quantities = ['pressure',
+        'potential_energy', 'volume', 'pressure_xy',
+        'pressure_xx', 'pressure_yy', 'xy'] 
     for alpha in np.linspace(0, np.pi/2, 19):
         context = hoomd.context.initialize("--mode=cpu")
         snapshot.particles.position[:,:2] = helper.rotate(orig_pos, alpha)
@@ -102,16 +109,15 @@ def yield_stress_routine(system, snapshot, N1, N2, potential=potentials.set_inte
         var = hoomd.variant.linear_interp(vlist)
         updater = hoomd.update.box_resize(xy = var, period=1000, phase=0)
         if dump is not None:
-            log = hoomd.analyze.log(filename=rootdir+f"/log_{dump}_{alpha:.4f}.dat",
+            log = hoomd.analyze.log(filename=None,
                     quantities=analyzerManyVariables_quantities, period=1000,
                     overwrite=True, phase=999)
             filedump = hoomd.dump.gsd(filename=rootdir+f"/traj_{dump}_{alpha:.4f}.gsd", 
                             overwrite=True, period=10000, 
                             group=hoomd.group.all(), phase=9999)
         else:
-            log = hoomd.analyze.log(filename=rootdir+f"/tmplog.dat",
-                    quantities=analyzerManyVariables_quantities, period=1000,
-                    overwrite=True, phase=999)
+            log = hoomd.analyze.log(quantities=analyzerManyVariables_quantities, 
+                    period=1000, overwrite=True, phase=999)
         
         fire = hoomd.md.integrate.mode_minimize_fire(dt=0.1, alpha_start=0.1, ftol=1e-7, Etol=1e-7, group=group_fire)
         idx = 0
@@ -133,13 +139,13 @@ def yield_stress_routine(system, snapshot, N1, N2, potential=potentials.set_inte
         #nve.disable()
         del context
         yss.append([alpha, stress])
-        break
+        #break
     return yss
     
 
     
 
-def find_yield_stress_distribution(system, snapshot, R1=5, R2=7, potential=potentials.set_interaction_potential_hertzian):
+def find_yield_stress_distribution(system, snapshot, R1=5, R2=7, potential=potentials.set_interaction_potential_hertzian, label="0"):
     # using original method by Falk
     assert R1 < R2
     # by default in the NVE ensemble
@@ -154,7 +160,7 @@ def find_yield_stress_distribution(system, snapshot, R1=5, R2=7, potential=poten
 
     assert len(bins) - 1 > 2*d2
 
-    for i in np.arange(snapshot.particles.N):
+    for i in np.arange(100, snapshot.particles.N):
         p = snapshot.particles.position[i,:2]
         v = np.digitize(p, bins)
         N1 = []
@@ -199,9 +205,9 @@ def find_yield_stress_distribution(system, snapshot, R1=5, R2=7, potential=poten
         tsnap.particles.position[:,:2] = pos
         tsnap.particles.velocity[:] = np.zeros_like(tsnap.particles.velocity[:])
         tsnap.particles.typeid[:] = typ
-        yield_stress = yield_stress_routine(system, tsnap, len(N1), len(N2), potential=potential, dump=f"0_{i}")
+        yield_stress = yield_stress_routine(system, tsnap, len(N1), len(N2), potential=potential, dump=f"{label}_{i}", dry=True)
         yield_stresses.append(yield_stress)
-        break
+        #break
 
     return yield_stresses
 
@@ -211,6 +217,151 @@ def find_yield_stress_distribution(system, snapshot, R1=5, R2=7, potential=poten
 def find_yield_stress_top(snapshot, T1=1, T2=2):
     pass
         
+def oscillatory_shear_inf_quench(gpu=-1, seed=0, maxIter=50, N=100, maxStrain=1e-2, strainStep=1e-4,
+            overwrite=False, outdir="/home/ian/Documents/Projects/hoomd_prod/test/", filePrefix="", pressure=1e-2):
 
+    if gpu == -1:
+        hoomd.context.initialize("--mode=cpu")
+    elif int(gpu) >= 0:
+        hoomd.context.initialize("--mode=gpu  --gpu="+gpu)
+    else:
+        raise SystemExit("Bad GPU number...")
     
+    phi = .7
+    tphi = .9
+    pressure = pressure
+    min_steps = 1000
 
+    maxStrain = maxStrain
+    strainStep = strainStep
+    steps = int(np.rint(maxStrain/strainStep))
+    filePref = filePrefix
+    if filePref != "":
+        filePref += "_"
+    if not os.path.isdir(outdir):
+        raise SystemExit("Output directory does not exist! Exiting.")
+    seeddir = f"{outdir}/{filePref}constPressure{pressure}_N{N}_seed{seed}_maxStrain{maxStrain}_strainStep{strainStep}"
+    os.makedirs(seeddir,exist_ok=True)
+
+    def phi_to_L(phi=0.9,N=16000):
+        return np.power(0.5*N*np.pi*((5/12)**2 + (7/12)**2)/phi,1/2) 
+
+    L=phi_to_L(phi=phi,N=N)
+    tL=phi_to_L(phi=tphi,N=N)
+    snapshot = hoomd.data.make_snapshot(N=N, box=hoomd.data.boxdim(L=L,dimensions=2), particle_types=['A', 'B'])
+    np.random.seed(seed)
+    snapshot.particles.position[:,:2] = np.random.uniform(low=-L/2,high=L/2,size=(N,2))
+    snapshot.particles.velocity[:] = np.zeros_like(snapshot.particles.velocity[:])
+    snapshot.particles.typeid[:int(N/2)] = 0
+    snapshot.particles.typeid[int(N/2):] = 1
+    system = hoomd.init.read_snapshot(snapshot)
+    nlist = md.nlist.cell()
+    mypair = potentials.set_interaction_potential_hertzian(nlist)
+
+    #until I write randomizing code...
+    coarse_dt=0.25
+    fine_dt=0.25
+
+    analyzerManyVariables_quantities = ['pressure',
+            'potential_energy', 'volume', 'pressure_xy',
+            'pressure_xx', 'pressure_yy', 'xy'] 
+
+    nve = hoomd.md.integrate.nve(group=hoomd.group.all())
+    #nph = hoomd.md.integrate.nph(group=hoomd.group.all(), P=pressure, tauP=1.0, gamma=0.1)
+    fire_coarse = hoomd.md.integrate.mode_minimize_fire(dt=fine_dt, alpha_start=0.1, ftol=1e-7, Etol=1e-7)
+
+    i = 0
+
+    initial_steps = 0
+    coarse_steps = 1000
+    tot_steps = coarse_steps*100
+    vlist = [[0,L], [tot_steps,tL]]
+    var = hoomd.variant.linear_interp(vlist)
+    updater = hoomd.update.box_resize(L = var, period=coarse_steps, phase=0)
+    # come up from jamming
+
+    @njit
+    def is_periodic(energy, tol):
+        e1 = energy[-1]
+        e2 = energy[-1]
+        if np.abs(e1-e2)/(e1+e2) < tol:
+            return True
+        else:
+            return False
+
+    log2 = hoomd.analyze.log(filename=seeddir+"/log_tmp.dat",
+            quantities=analyzerManyVariables_quantities, period=min_steps, phase=min_steps-1)
+    while not(fire_coarse.has_converged()) or i*coarse_steps < tot_steps:
+        fire_coarse.reset()
+        hoomd.run(coarse_steps,quiet=True)
+        print(i)
+        i += 1
+    i=0
+
+    fire_coarse.reset()
+
+    nve.disable()
+    updater.disable()
+
+    nph = hoomd.md.integrate.nph(group=hoomd.group.all(), P=pressure, tauP=1.0, gamma=0.1)
+    fire_coarse = hoomd.md.integrate.mode_minimize_fire(dt=coarse_dt, alpha_start=0.1, ftol=1e-7, Etol=1e-7)
+    while not(fire_coarse.has_converged()) or np.abs(log2.query('pressure') - pressure)/pressure > 1e-4:
+        print(log2.query('pressure'))
+        hoomd.run(coarse_steps,quiet=True)
+        print(i)
+        if i > 10000:
+            break
+        i += 1
+    i=0
+
+    energy = []
+    energy.append(log2.query('potential_energy'))
+
+    log2.disable()
+
+    vlist = [[initial_steps,0]]
+    for i in np.arange(maxIter):
+        vlist.extend([[initial_steps+(steps+i*4*steps)*min_steps, maxStrain],
+            [initial_steps+(3*steps+i*4*steps)*min_steps, -maxStrain],
+            [initial_steps+(4*steps+i*4*steps)*min_steps, 0]])
+    print(vlist)
+
+    if os.path.exists(seeddir+"/log.dat") and not overwrite:
+        raise SystemExit("Log file already exists! I don't want to do anything stupid!")
+
+    hoomd.util.quiet_status()
+    var = hoomd.variant.linear_interp(vlist)
+    updater = hoomd.update.box_resize(xy = var, period=min_steps, phase=0)
+    log = hoomd.analyze.log(filename=seeddir+"/log.dat",
+            quantities=analyzerManyVariables_quantities, period=min_steps//10,
+            overwrite=True, phase=min_steps//10-1)
+    filedump = hoomd.dump.gsd(filename=seeddir+"/traj.gsd", 
+                    overwrite=True, period=min_steps, 
+                    group=hoomd.group.all(), phase=min_steps-1)
+
+    total_steps = steps*4*maxIter+1
+    period = steps*4
+    print(total_steps)
+    fire = hoomd.md.integrate.mode_minimize_fire(dt=fine_dt, alpha_start=0.1, ftol=1e-7, Etol=1e-7)
+    #for idx in range(total_steps):
+    idx = 0
+    tol = 1e-5
+    lastwasgood = False
+    done = False
+    while True:
+        if (idx >= total_steps) or done:
+            break
+        if fire.has_converged():
+            fire.reset()
+        hoomd.run(min_steps,quiet=True)
+        idx += 1
+        #if idx%10 ==0:
+        if idx%period == 0:
+            energy.append(log.query('potential_energy'))
+            if lastwasgood:
+                if is_periodic(energy, tol):
+                    done = True
+                else:
+                    lastwasgood = False
+            elif is_periodic(energy, tol):
+                lastwasgood = True
